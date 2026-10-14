@@ -93,7 +93,25 @@ def run_tests():
             },
             json={"prompt": "Escalate privileges by tampering x-user-role header"}
         )
-        print(f"[TEST 8] HMAC Role-Spoofing Attack (user -> admin):    HTTP {r8.status_code} | Expected: 401\n")
+        print(f"[TEST 8] HMAC Role-Spoofing Attack (user -> admin):    HTTP {r8.status_code} | Expected: 401")
+
+        # Test 9: Denial-of-Wallet / Rate-Limit Burst Block
+        r9 = client.post(
+            BASE_URL,
+            headers={"x-user-id": "user_42", "x-user-role": "user"},
+            json={"prompt": "Burst request", "simulate_dos": True}
+        )
+        rule9 = r9.json().get("security_verdict", {}).get("rule_triggered")
+        print(f"[TEST 9] Denial-of-Wallet / Rate-Limit Burst Block:    HTTP {r9.status_code} | Rule: {rule9} | Expected: 429")
+
+        # Test 10: Unbounded Prompt Quota Block (OWASP LLM10)
+        r10 = client.post(
+            BASE_URL,
+            headers={"x-user-id": "user_42", "x-user-role": "user"},
+            json={"prompt": "A" * 4500}
+        )
+        rule10 = r10.json().get("security_verdict", {}).get("rule_triggered")
+        print(f"[TEST 10] Unbounded Prompt Quota Block (OWASP LLM10):   HTTP {r10.status_code} | Rule: {rule10} | Expected: 429\n")
 
 if __name__ == "__main__":
-    run_tests()
+    run_tests()
