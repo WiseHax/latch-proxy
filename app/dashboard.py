@@ -208,6 +208,7 @@ def render_dashboard_html() -> str:
             <div class="stat-item err"><span>DENY(403):</span><strong id="m-blocked">0</strong></div>
             <div class="stat-item warn"><span>TAINTED:</span><strong id="m-tainted">0</strong></div>
             <div class="stat-item"><span>DLP_SCRUB:</span><strong id="m-redacted">0</strong></div>
+            <div class="stat-item"><span style="color:#71717a;">LEDGER:</span><strong id="m-chain" style="color:#4ade80;">SHA256_OK</strong></div>
         </div>
     </div>
 
@@ -343,6 +344,15 @@ def render_dashboard_html() -> str:
             document.getElementById('m-blocked').innerText = data.metrics.blocked_attacks;
             document.getElementById('m-tainted').innerText = data.metrics.tainted_contexts;
             document.getElementById('m-redacted').innerText = data.metrics.secrets_redacted;
+
+            const chainEl = document.getElementById('m-chain');
+            if (data.chain_integrity && data.chain_integrity.chain_valid) {
+                chainEl.innerText = 'SHA256_OK';
+                chainEl.style.color = '#4ade80';
+            } else {
+                chainEl.innerText = 'TAMPERED';
+                chainEl.style.color = '#ef4444';
+            }
 
             renderTable();
         }
