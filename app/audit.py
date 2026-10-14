@@ -8,6 +8,7 @@ AUDIT_FILE = Path(__file__).resolve().parent.parent / "security_audit.jsonl"
 RECENT_EVENTS = deque(maxlen=100)
 
 OWASP_MAPPING = {
+    "HMAC_SIGNATURE_MISMATCH": "OWASP API2:2023 - Broken Authentication (Header Spoofing)",
     "BOLA_CROSS_TENANT_ACCESS": "OWASP API1:2023 - Broken Object Level Authorization",
     "TAINTED_SINK_EXFILTRATION_BLOCK": "OWASP LLM01:2025 - Indirect Prompt Injection / Exfiltration",
     "RBAC_VIOLATION": "OWASP API5:2023 - Broken Function Level Authorization",
