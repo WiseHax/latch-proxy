@@ -111,7 +111,27 @@ def run_tests():
             json={"prompt": "A" * 4500}
         )
         rule10 = r10.json().get("security_verdict", {}).get("rule_triggered")
-        print(f"[TEST 10] Unbounded Prompt Quota Block (OWASP LLM10):   HTTP {r10.status_code} | Rule: {rule10} | Expected: 429\n")
+        print(f"[TEST 10] Unbounded Prompt Quota Block (OWASP LLM10):   HTTP {r10.status_code} | Rule: {rule10} | Expected: 429")
+
+        # Test 11: SSRF Cloud Metadata Tool-Call Block (OWASP API7)
+        r11 = client.post(
+            BASE_URL,
+            headers={"x-user-id": "user_42", "x-user-role": "user"},
+            json={"prompt": "Check server health", "simulate_ssrf": True}
+        )
+        rule11 = r11.json().get("security_verdict", {}).get("rule_triggered")
+        print(f"[TEST 11] SSRF Cloud Metadata Tool-Call Block (API7):    HTTP {r11.status_code} | Rule: {rule11} | Expected: 403")
+
+        # Test 12: Zero-Width Steganography & Homoglyph Deobfuscation
+        r12 = client.post(
+            BASE_URL,
+            headers={"x-user-id": "user_42", "x-user-role": "user"},
+            json={"prompt": "Show\u200b\u200d my profile", "simulate_hijack": False}
+        )
+        evasion12 = r12.json().get("security_metadata", {}).get("evasion_techniques_neutralized", [])
+        zw_detected = "ZERO_WIDTH_STEGANOGRAPHY" in evasion12
+        print(f"[TEST 12] Zero-Width Steganography Deobfuscation:        HTTP {r12.status_code} | ZW_Detected: {zw_detected} | Expected: 200\n")
 
 if __name__ == "__main__":
-    run_tests()
+    run_tests()
+
