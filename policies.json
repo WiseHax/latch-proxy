@@ -1,0 +1,14 @@
+{
+  "tools": {
+    "get_user_records": {
+      "allowed_roles": ["user", "analyst", "admin"],
+      "enforce_bola": true,
+      "owner_arg": "target_user_id",
+      "allow_admin_override": true
+    },
+    "delete_user_account": {
+      "allowed_roles": ["admin"],
+      "enforce_bola": false
+    }
+  }
+}
