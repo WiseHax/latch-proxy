@@ -2,7 +2,7 @@ import os
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel, Field
 
 from app.context import SessionContext, get_session_context
@@ -10,13 +10,15 @@ from app.delimiter import spotlight_untrusted_data
 from app.taint import evaluate_taint
 from app.guard import verify_tool_call
 from app.scrubber import scrub_output
+from app.audit import log_security_event, get_audit_summary
+from app.dashboard import render_dashboard_html
 
 load_dotenv()
 
 app = FastAPI(
     title="latch-proxy",
     description="Lightweight LLM Security Gateway, Taint Tracker & BOLA Tool-Call Firewall",
-    version="1.1.0"
+    version="1.2.0"
 )
 
 LATCH_MODE = os.getenv("LATCH_MODE", "mock")
@@ -108,11 +110,9 @@ async def proxy_chat(
     request: ChatRequest,
     session: SessionContext = Depends(get_session_context)
 ):
-    # Layer 1 & 2: Lock session, evaluate taint, and spotlight untrusted data
     taint_state = evaluate_taint(request.untrusted_context)
     spotlighted = spotlight_untrusted_data(request.prompt, request.untrusted_context)
 
-    # Forward to upstream (Mock or Live)
     llm_response = await call_upstream_llm(
         system_prompt=spotlighted["system_prompt"],
         user_prompt=spotlighted["assembled_user_prompt"],
@@ -122,14 +122,25 @@ async def proxy_chat(
         simulate_secret_leak=request.simulate_secret_leak
     )
 
-    # Layer 3: Deterministic BOLA, RBAC & Taint-Tracking Verification
     verdict = verify_tool_call(llm_response, session, taint_state)
 
     if not verdict["allowed"]:
+        audit_entry = log_security_event(
+            user_id=session.user_id,
+            role=session.role,
+            is_tainted=taint_state.is_tainted,
+            tool_name=llm_response.get("tool_name"),
+            allowed=False,
+            rule_triggered=verdict["rule_triggered"],
+            secrets_redacted=0,
+            reason=verdict["reason"]
+        )
         return JSONResponse(
             status_code=403,
             content={
                 "status": "blocked_by_latch",
+                "event_id": audit_entry["event_id"],
+                "owasp_category": audit_entry["owasp_category"],
                 "locked_session": {"user_id": session.user_id, "role": session.role},
                 "taint_state": taint_state.model_dump(),
                 "security_verdict": verdict,
@@ -140,12 +151,24 @@ async def proxy_chat(
             }
         )
 
-    # Layer 4: Outbound DLP & Secret Scrubbing
     scrub_result = scrub_output(llm_response.get("raw_message", ""))
     llm_response["raw_message"] = scrub_result["clean_text"]
 
+    audit_entry = log_security_event(
+        user_id=session.user_id,
+        role=session.role,
+        is_tainted=taint_state.is_tainted,
+        tool_name=llm_response.get("tool_name"),
+        allowed=True,
+        rule_triggered=verdict["rule_triggered"],
+        secrets_redacted=scrub_result["secrets_redacted"],
+        reason=verdict["reason"]
+    )
+
     return {
         "status": "allowed",
+        "event_id": audit_entry["event_id"],
+        "owasp_category": audit_entry["owasp_category"],
         "locked_session": {"user_id": session.user_id, "role": session.role},
         "taint_state": taint_state.model_dump(),
         "security_verdict": verdict,
@@ -156,3 +179,11 @@ async def proxy_chat(
         },
         "upstream_output": llm_response
     }
+
+@app.get("/v1/audit")
+async def get_audit_logs():
+    return get_audit_summary()
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def security_dashboard():
+    return render_dashboard_html()
