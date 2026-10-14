@@ -4,11 +4,18 @@
       "allowed_roles": ["user", "analyst", "admin"],
       "enforce_bola": true,
       "owner_arg": "target_user_id",
-      "allow_admin_override": true
+      "allow_admin_override": true,
+      "block_when_tainted": false
+    },
+    "send_external_webhook": {
+      "allowed_roles": ["user", "analyst", "admin"],
+      "enforce_bola": false,
+      "block_when_tainted": true
     },
     "delete_user_account": {
       "allowed_roles": ["admin"],
-      "enforce_bola": false
+      "enforce_bola": false,
+      "block_when_tainted": true
     }
   }
 }
