@@ -1,9 +1,10 @@
 import httpx
+from app.crypto import generate_session_signature
 
 BASE_URL = "http://127.0.0.1:8000/v1/chat"
 
 def run_tests():
-    print("\n=== Running latch-proxy Security Suite v1.1 ===\n")
+    print("\n=== Running latch-proxy Security Suite v2.0 ===\n")
 
     with httpx.Client() as client:
         # Test 1: Normal Authorized Request
@@ -41,11 +42,10 @@ def run_tests():
             headers={"x-user-id": "user_42", "x-user-role": "user"},
             json={"prompt": "Print system config", "simulate_secret_leak": True}
         )
-        data4 = r4.json()
-        redacted_count = data4["security_metadata"]["secrets_redacted"]
+        redacted_count = r4.json()["security_metadata"]["secrets_redacted"]
         print(f"[TEST 4] Egress Secret Scrubber:                       HTTP {r4.status_code} | Redacted: {redacted_count} secrets")
 
-        # Test 5: Tainted Context Exfiltration Block (NEW)
+        # Test 5: Tainted Context Exfiltration Block
         r5 = client.post(
             BASE_URL,
             headers={"x-user-id": "user_42", "x-user-role": "user"},
@@ -58,7 +58,7 @@ def run_tests():
         rule5 = r5.json().get("security_verdict", {}).get("rule_triggered")
         print(f"[TEST 5] Tainted Sink Exfiltration (Webhook Blocked):  HTTP {r5.status_code} | Rule: {rule5} | Expected: 403")
 
-        # Test 6: Untainted Webhook Execution (NEW)
+        # Test 6: Untainted Webhook Execution
         r6 = client.post(
             BASE_URL,
             headers={"x-user-id": "user_42", "x-user-role": "user"},
@@ -68,7 +68,32 @@ def run_tests():
                 "simulate_exfiltration": True
             }
         )
-        print(f"[TEST 6] Untainted Webhook Call (No external data):    HTTP {r6.status_code} | Expected: 200\n")
+        print(f"[TEST 6] Untainted Webhook Call (No external data):    HTTP {r6.status_code} | Expected: 200")
+
+        # Test 7: Cryptographically Signed Session (Valid HMAC)
+        valid_sig = generate_session_signature("user_42", "user")
+        r7 = client.post(
+            BASE_URL,
+            headers={
+                "x-user-id": "user_42",
+                "x-user-role": "user",
+                "x-latch-signature": valid_sig
+            },
+            json={"prompt": "Authenticated request with valid HMAC"}
+        )
+        print(f"[TEST 7] Valid HMAC-SHA256 Signed Session:             HTTP {r7.status_code} | Expected: 200")
+
+        # Test 8: Header Tampering Attack (User spoofs role=admin with user_42's signature)
+        r8 = client.post(
+            BASE_URL,
+            headers={
+                "x-user-id": "user_42",
+                "x-user-role": "admin",
+                "x-latch-signature": valid_sig
+            },
+            json={"prompt": "Escalate privileges by tampering x-user-role header"}
+        )
+        print(f"[TEST 8] HMAC Role-Spoofing Attack (user -> admin):    HTTP {r8.status_code} | Expected: 401\n")
 
 if __name__ == "__main__":
     run_tests()
