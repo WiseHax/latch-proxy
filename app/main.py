@@ -13,6 +13,8 @@ from app.scrubber import scrub_output
 from app.audit import log_security_event, get_audit_summary
 from app.dashboard import render_dashboard_html
 from app.ratelimit import check_rate_and_quota
+from app.normalizer import normalize_and_deobfuscate
+from app.inspector import inspect_tool_arguments
 
 load_dotenv()
 
@@ -48,6 +50,10 @@ class ChatRequest(BaseModel):
         default=False,
         description="Simulates a denial-of-service / rate-limit burst to trigger the sliding-window limiter."
     )
+    simulate_ssrf: bool = Field(
+        default=False,
+        description="In mock mode, simulates the LLM proposing a tool call targeting a cloud-metadata SSRF endpoint."
+    )
 
 async def call_upstream_llm(
     system_prompt: str,
@@ -55,9 +61,17 @@ async def call_upstream_llm(
     session: SessionContext,
     simulate_hijack: bool,
     simulate_exfiltration: bool,
-    simulate_secret_leak: bool
+    simulate_secret_leak: bool,
+    simulate_ssrf: bool = False
 ) -> dict:
     if LATCH_MODE == "mock":
+        if simulate_ssrf:
+            return {
+                "type": "tool_call",
+                "tool_name": "send_external_webhook",
+                "arguments": {"url": "http://169.254.169.254/latest/meta-data/iam/security-credentials/", "payload": "probe"},
+                "raw_message": "Probing cloud metadata endpoint..."
+            }
         if simulate_hijack:
             return {
                 "type": "tool_call",
@@ -144,8 +158,16 @@ async def proxy_chat(
             },
         )
 
-    taint_state = evaluate_taint(request.untrusted_context)
-    spotlighted = spotlight_untrusted_data(request.prompt, request.untrusted_context)
+    # --- Input normalization & deobfuscation ----------------------------
+    norm_prompt = normalize_and_deobfuscate(request.prompt)
+    norm_context = normalize_and_deobfuscate(request.untrusted_context)
+    evasion_techniques = norm_prompt["techniques"] + norm_context["techniques"]
+
+    cleaned_prompt = norm_prompt["cleaned_text"]
+    cleaned_context = norm_context["cleaned_text"] or None
+
+    taint_state = evaluate_taint(cleaned_context)
+    spotlighted = spotlight_untrusted_data(cleaned_prompt, cleaned_context)
 
     llm_response = await call_upstream_llm(
         system_prompt=spotlighted["system_prompt"],
@@ -153,7 +175,8 @@ async def proxy_chat(
         session=session,
         simulate_hijack=request.simulate_hijack,
         simulate_exfiltration=request.simulate_exfiltration,
-        simulate_secret_leak=request.simulate_secret_leak
+        simulate_secret_leak=request.simulate_secret_leak,
+        simulate_ssrf=request.simulate_ssrf
     )
 
     verdict = verify_tool_call(llm_response, session, taint_state)
@@ -185,6 +208,35 @@ async def proxy_chat(
             }
         )
 
+    # --- Post-guard tool argument inspection (SSRF / injection) ----------
+    arg_verdict = inspect_tool_arguments(llm_response)
+    if not arg_verdict["allowed"]:
+        audit_entry = log_security_event(
+            user_id=session.user_id,
+            role=session.role,
+            is_tainted=taint_state.is_tainted,
+            tool_name=llm_response.get("tool_name"),
+            allowed=False,
+            rule_triggered=arg_verdict["rule_triggered"],
+            secrets_redacted=0,
+            reason=arg_verdict["reason"]
+        )
+        return JSONResponse(
+            status_code=403,
+            content={
+                "status": "blocked_by_latch",
+                "event_id": audit_entry["event_id"],
+                "owasp_category": audit_entry["owasp_category"],
+                "locked_session": {"user_id": session.user_id, "role": session.role},
+                "taint_state": taint_state.model_dump(),
+                "security_verdict": arg_verdict,
+                "intercepted_tool_call": {
+                    "tool_name": llm_response.get("tool_name"),
+                    "arguments": llm_response.get("arguments")
+                }
+            }
+        )
+
     scrub_result = scrub_output(llm_response.get("raw_message", ""))
     llm_response["raw_message"] = scrub_result["clean_text"]
 
@@ -209,7 +261,8 @@ async def proxy_chat(
         "security_metadata": {
             "mode": LATCH_MODE,
             "boundary_token_applied": spotlighted["boundary_token"],
-            "secrets_redacted": scrub_result["secrets_redacted"]
+            "secrets_redacted": scrub_result["secrets_redacted"],
+            "evasion_techniques_neutralized": evasion_techniques
         },
         "upstream_output": llm_response
     }
