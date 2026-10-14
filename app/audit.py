@@ -13,6 +13,8 @@ OWASP_MAPPING = {
     "TAINTED_SINK_EXFILTRATION_BLOCK": "OWASP LLM01:2025 - Indirect Prompt Injection / Exfiltration",
     "RBAC_VIOLATION": "OWASP API5:2023 - Broken Function Level Authorization",
     "UNREGISTERED_TOOL": "OWASP LLM07:2025 - Excessive Agency",
+    "RATE_LIMIT_DOS_BLOCK": "OWASP API4:2023 - Unrestricted Resource Consumption",
+    "DENIAL_OF_WALLET_QUOTA_EXCEEDED": "OWASP LLM10:2025 - Unbounded Consumption (Denial of Wallet)",
     "PASS": "NONE",
     "NONE": "NONE"
 }
