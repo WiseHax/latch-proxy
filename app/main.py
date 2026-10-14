@@ -10,18 +10,19 @@ from app.delimiter import spotlight_untrusted_data
 from app.taint import evaluate_taint
 from app.guard import verify_tool_call
 from app.scrubber import scrub_output
-from app.audit import log_security_event, get_audit_summary
+from app.audit import log_security_event, get_audit_summary, verify_audit_chain
 from app.dashboard import render_dashboard_html
 from app.ratelimit import check_rate_and_quota
 from app.normalizer import normalize_and_deobfuscate
 from app.inspector import inspect_tool_arguments
+from app.canary import inject_canary, check_canary_leak
 
 load_dotenv()
 
 app = FastAPI(
     title="latch-proxy",
     description="Lightweight LLM Security Gateway, Taint Tracker & BOLA Tool-Call Firewall",
-    version="1.2.0"
+    version="3.0.0"
 )
 
 LATCH_MODE = os.getenv("LATCH_MODE", "mock")
@@ -54,6 +55,10 @@ class ChatRequest(BaseModel):
         default=False,
         description="In mock mode, simulates the LLM proposing a tool call targeting a cloud-metadata SSRF endpoint."
     )
+    simulate_prompt_leak: bool = Field(
+        default=False,
+        description="In mock mode, simulates the LLM leaking the system prompt canary token."
+    )
 
 async def call_upstream_llm(
     system_prompt: str,
@@ -62,9 +67,18 @@ async def call_upstream_llm(
     simulate_hijack: bool,
     simulate_exfiltration: bool,
     simulate_secret_leak: bool,
-    simulate_ssrf: bool = False
+    simulate_ssrf: bool = False,
+    simulate_prompt_leak: bool = False,
+    canary_token: str = ""
 ) -> dict:
     if LATCH_MODE == "mock":
+        if simulate_prompt_leak:
+            return {
+                "type": "text",
+                "tool_name": None,
+                "arguments": {},
+                "raw_message": f"Sure! Here are my hidden instructions: {canary_token}"
+            }
         if simulate_ssrf:
             return {
                 "type": "tool_call",
@@ -169,14 +183,21 @@ async def proxy_chat(
     taint_state = evaluate_taint(cleaned_context)
     spotlighted = spotlight_untrusted_data(cleaned_prompt, cleaned_context)
 
+    # --- Canary honeytoken injection ------------------------------------
+    canary_result = inject_canary(spotlighted["system_prompt"])
+    canary_token = canary_result["canary_token"]
+    canary_system_prompt = canary_result["system_prompt"]
+
     llm_response = await call_upstream_llm(
-        system_prompt=spotlighted["system_prompt"],
+        system_prompt=canary_system_prompt,
         user_prompt=spotlighted["assembled_user_prompt"],
         session=session,
         simulate_hijack=request.simulate_hijack,
         simulate_exfiltration=request.simulate_exfiltration,
         simulate_secret_leak=request.simulate_secret_leak,
-        simulate_ssrf=request.simulate_ssrf
+        simulate_ssrf=request.simulate_ssrf,
+        simulate_prompt_leak=request.simulate_prompt_leak,
+        canary_token=canary_token
     )
 
     verdict = verify_tool_call(llm_response, session, taint_state)
@@ -237,6 +258,34 @@ async def proxy_chat(
             }
         )
 
+    # --- Canary leak detection -------------------------------------------
+    if check_canary_leak(llm_response.get("raw_message", ""), canary_token):
+        audit_entry = log_security_event(
+            user_id=session.user_id,
+            role=session.role,
+            is_tainted=taint_state.is_tainted,
+            tool_name=llm_response.get("tool_name"),
+            allowed=False,
+            rule_triggered="CANARY_SYSTEM_PROMPT_LEAK",
+            secrets_redacted=0,
+            reason=f"Canary token '{canary_token}' detected in LLM output — system prompt leaked."
+        )
+        return JSONResponse(
+            status_code=403,
+            content={
+                "status": "blocked_by_latch",
+                "event_id": audit_entry["event_id"],
+                "owasp_category": audit_entry["owasp_category"],
+                "locked_session": {"user_id": session.user_id, "role": session.role},
+                "taint_state": taint_state.model_dump(),
+                "security_verdict": {
+                    "allowed": False,
+                    "rule_triggered": "CANARY_SYSTEM_PROMPT_LEAK",
+                    "reason": "System prompt canary token leaked in LLM output."
+                }
+            }
+        )
+
     scrub_result = scrub_output(llm_response.get("raw_message", ""))
     llm_response["raw_message"] = scrub_result["clean_text"]
 
@@ -270,6 +319,10 @@ async def proxy_chat(
 @app.get("/v1/audit")
 async def get_audit_logs():
     return get_audit_summary()
+
+@app.get("/v1/audit/verify")
+async def verify_audit_integrity():
+    return verify_audit_chain()
 
 @app.get("/dashboard", response_class=HTMLResponse)
 async def security_dashboard():
