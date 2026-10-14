@@ -1,95 +1,128 @@
-import re
 import ipaddress
-from urllib.parse import urlparse
+import re
+from urllib.parse import urlparse, unquote
 
-# ---------------------------------------------------------------------------
-# Post-guard tool argument inspector
-# ---------------------------------------------------------------------------
-# Inspects string values in LLM-proposed tool call arguments for SSRF
-# targeting internal/cloud-metadata endpoints and path traversal / command
-# injection payloads.
-# ---------------------------------------------------------------------------
+# Blocked internal hostnames, cloud metadata aliases, and DNS rebinding suffixes
+BLOCKED_HOSTS = {
+    "localhost",
+    "0.0.0.0",
+    "169.254.169.254",
+    "metadata.google.internal",
+    "metadata.goog",
+    "instance-data",
+    "100.100.100.200",  # Alibaba Cloud IMDS
+}
 
-# URL pattern to extract from argument values
-_URL_RE = re.compile(r"https?://[^\s\"']+", re.IGNORECASE)
+DNS_REBINDING_SUFFIXES = (
+    ".nip.io",
+    ".sslip.io",
+    ".xip.io",
+    ".localtest.me",
+    ".lvh.me",
+    ".vcap.me",
+    ".local",
+    ".internal",
+    ".localhost",
+)
 
-# Hostnames that are always blocked (case-insensitive comparison)
-_BLOCKED_HOSTS = {"localhost", "0.0.0.0", "169.254.169.254"}
+URL_REGEX = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
 
-# Shell injection / path traversal patterns
-_INJECTION_PATTERNS = [
+DANGEROUS_PATTERNS = [
     "../",
     "..\\",
     "/etc/passwd",
+    "/etc/shadow",
+    "c:\\windows\\system32",
     "; rm ",
     "| bash",
+    "| sh",
     "$(",
     "`",
 ]
 
 
-def _is_internal_host(hostname: str) -> bool:
-    """Check if a hostname resolves to a blocked, loopback, private, link-local, or reserved address."""
-    if hostname.lower() in _BLOCKED_HOSTS:
-        return True
-    # Strip IPv6 brackets
-    bare = hostname.strip("[]")
+def _is_forbidden_host(hostname: str) -> tuple[bool, str]:
+    host = hostname.strip().lower().rstrip(".")
+
+    if not host:
+        return True, "Empty hostname in URL"
+
+    if host in BLOCKED_HOSTS:
+        return True, f"Blocked internal/metadata host '{host}'"
+
+    # Block wildcard DNS rebinding domains (e.g., 169.254.169.254.nip.io)
+    if host.endswith(DNS_REBINDING_SUFFIXES):
+        return True, f"Wildcard DNS rebinding domain '{host}' is forbidden"
+
+    # Block embedded private/metadata IPv4 patterns inside subdomains
+    if re.search(r"(^|\.)(127\.0\.0\.1|169\.254\.169\.254|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+)(\.|$)", host):
+        return True, f"Embedded internal IP address detected in hostname '{host}'"
+
+    # Check literal IP addresses (IPv4 / IPv6)
     try:
-        addr = ipaddress.ip_address(bare)
-        return (
-            addr.is_loopback
-            or addr.is_private
-            or addr.is_link_local
-            or addr.is_reserved
-        )
+        ip = ipaddress.ip_address(host.strip("[]"))
+        if (
+            ip.is_loopback
+            or ip.is_private
+            or ip.is_link_local
+            or ip.is_reserved
+            or ip.is_multicast
+            or ip.is_unspecified
+        ):
+            return True, f"Non-public IP address '{ip}' is forbidden"
     except ValueError:
-        return False
+        pass
+
+    return False, ""
 
 
 def inspect_tool_arguments(llm_output: dict) -> dict:
     """
-    Inspect all string values in tool call arguments for SSRF and injection payloads.
-
-    Returns:
-        {"allowed": bool, "rule_triggered": str, "reason": str}
+    Deep inspection of tool-call arguments for SSRF (including DNS rebinding)
+    and URL-encoded path traversal / command injection payloads.
     """
     if llm_output.get("type") != "tool_call":
-        return {"allowed": True, "rule_triggered": "NONE", "reason": "Not a tool call."}
+        return {
+            "allowed": True,
+            "rule_triggered": "NONE",
+            "reason": "No tool call arguments to inspect.",
+        }
 
-    arguments = llm_output.get("arguments", {})
+    args = llm_output.get("arguments", {})
+    if not isinstance(args, dict):
+        return {"allowed": True, "rule_triggered": "NONE", "reason": "Empty arguments."}
 
-    for key, value in arguments.items():
-        if not isinstance(value, str):
+    for key, raw_value in args.items():
+        if not isinstance(raw_value, str):
             continue
 
-        # --- SSRF Protection ----------------------------------------------
-        for url_match in _URL_RE.findall(value):
-            try:
-                parsed = urlparse(url_match)
-                hostname = parsed.hostname or ""
-            except Exception:
-                continue
+        # Decode URL-encoded sequences twice to catch single/double-encoded traversal (%2e%2e%2f)
+        decoded_value = unquote(unquote(raw_value))
+        lower_val = decoded_value.lower()
 
-            if _is_internal_host(hostname):
+        # 1. Check URLs for SSRF & DNS Rebinding
+        for match in URL_REGEX.findall(decoded_value):
+            parsed = urlparse(match)
+            hostname = parsed.hostname or ""
+            is_bad, detail = _is_forbidden_host(hostname)
+            if is_bad:
                 return {
                     "allowed": False,
                     "rule_triggered": "SSRF_INTERNAL_TARGET_BLOCK",
-                    "reason": (
-                        f"Tool argument '{key}' contains URL targeting internal/cloud-metadata "
-                        f"host '{hostname}': {url_match}"
-                    ),
+                    "reason": f"SSRF Firewall blocked argument '{key}': {detail}.",
                 }
 
-        # --- Path Traversal & Command Injection Protection ----------------
-        for pattern in _INJECTION_PATTERNS:
-            if pattern in value:
+        # 2. Check for Path Traversal & Command Injection
+        for pattern in DANGEROUS_PATTERNS:
+            if pattern in lower_val:
                 return {
                     "allowed": False,
                     "rule_triggered": "MALICIOUS_TOOL_ARGUMENT_PAYLOAD",
-                    "reason": (
-                        f"Tool argument '{key}' contains suspicious payload pattern: "
-                        f"'{pattern}'"
-                    ),
+                    "reason": f"Argument '{key}' contains forbidden payload pattern '{pattern}'.",
                 }
 
-    return {"allowed": True, "rule_triggered": "NONE", "reason": "Tool arguments are clean."}
+    return {
+        "allowed": True,
+        "rule_triggered": "PASS",
+        "reason": "All tool arguments passed deep SSRF and payload inspection.",
+    }
