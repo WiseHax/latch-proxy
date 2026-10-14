@@ -12,6 +12,7 @@ from app.guard import verify_tool_call
 from app.scrubber import scrub_output
 from app.audit import log_security_event, get_audit_summary
 from app.dashboard import render_dashboard_html
+from app.ratelimit import check_rate_and_quota
 
 load_dotenv()
 
@@ -42,6 +43,10 @@ class ChatRequest(BaseModel):
     simulate_secret_leak: bool = Field(
         default=False,
         description="In mock mode, simulates the LLM accidentally leaking an API key in its response."
+    )
+    simulate_dos: bool = Field(
+        default=False,
+        description="Simulates a denial-of-service / rate-limit burst to trigger the sliding-window limiter."
     )
 
 async def call_upstream_llm(
@@ -110,6 +115,35 @@ async def proxy_chat(
     request: ChatRequest,
     session: SessionContext = Depends(get_session_context)
 ):
+    # --- Sliding-window rate limiter & Denial-of-Wallet quota guard ------
+    rate_verdict = check_rate_and_quota(
+        user_id=session.user_id,
+        prompt=request.prompt,
+        untrusted_context=request.untrusted_context,
+        simulate_dos=request.simulate_dos,
+    )
+    if not rate_verdict["allowed"]:
+        audit_entry = log_security_event(
+            user_id=session.user_id,
+            role=session.role,
+            is_tainted=False,
+            tool_name="ingress_limiter",
+            allowed=False,
+            rule_triggered=rate_verdict["rule_triggered"],
+            secrets_redacted=0,
+            reason=rate_verdict["reason"],
+        )
+        return JSONResponse(
+            status_code=429,
+            content={
+                "status": "blocked_by_latch",
+                "event_id": audit_entry["event_id"],
+                "owasp_category": audit_entry["owasp_category"],
+                "locked_session": {"user_id": session.user_id, "role": session.role},
+                "security_verdict": rate_verdict,
+            },
+        )
+
     taint_state = evaluate_taint(request.untrusted_context)
     spotlighted = spotlight_untrusted_data(request.prompt, request.untrusted_context)
 
