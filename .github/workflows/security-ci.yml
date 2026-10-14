@@ -1,0 +1,31 @@
+name: Security CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  security-tests:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Start proxy server
+        run: uvicorn app.main:app --host 127.0.0.1 --port 8000 &
+
+      - name: Wait for server startup
+        run: sleep 3
+
+      - name: Run security regression suite
+        run: python test_attacks.py
