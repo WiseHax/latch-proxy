@@ -1,15 +1,16 @@
 # latch-proxy
 
-A lightweight, zero-trust FastAPI reverse proxy that protects LLM-powered applications from **Indirect Prompt Injection (OWASP LLM01)**, **Broken Object Level Authorization / BOLA (OWASP API1)** on tool calls, and **outbound credential leaks**.
+A zero-trust FastAPI reverse proxy and runtime security gateway that protects LLM-integrated applications from **Indirect Prompt Injection (OWASP LLM01)**, **Broken Object Level Authorization / BOLA (OWASP API1)**, **Header Spoofing (OWASP API2)**, **Data Exfiltration**, and **Sensitive Information Disclosure (OWASP LLM02)**.
 
 ---
 
-## Architecture & Security Layers
+## Defense-in-Depth Architecture
 
-1. **Immutable Session Binding (`app/context.py`):** Extracts the authenticated caller's `user_id` and `role` from HTTP headers and locks them into a frozen server-side Pydantic state object (`frozen=True`) that prompt payloads cannot overwrite.
-2. **Cryptographic Context Spotlighting (`app/delimiter.py`):** Wraps untrusted external data (RAG documents, user bios, database rows) inside per-request randomized hex boundaries (`[[UNTRUSTED_DATA_START_<hex>]]`) and strips spoofed closing tags to prevent tag-escape attacks.
-3. **Deterministic BOLA & RBAC Tool Guard (`app/guard.py`):** Intercepts model-generated tool calls before execution and enforces resource ownership (`target_user_id == session.user_id`) and role permissions defined in `policies.json`.
-4. **Egress DLP Scrubber (`app/scrubber.py`):** Scans outgoing responses and redacts leaked API keys (`sk-...`, `AIza...`), JWTs, and plaintext credential assignments before returning output to the client.
+1. **HMAC-SHA256 Identity & Session Lock (`app/context.py`, `app/crypto.py`):** Verifies cryptographic session signatures (`X-Latch-Signature`) using constant-time comparison (`hmac.compare_digest`) and binds `user_id` and `role` into an immutable Pydantic state object (`frozen=True`).
+2. **Cryptographic Context Spotlighting (`app/delimiter.py`):** Isolates untrusted external inputs (RAG chunks, emails, web scrapes) inside randomized per-request hex boundaries (`[[UNTRUSTED_DATA_START_<hex>]]`) and sanitizes spoofed closing tags.
+3. **Dynamic Taint-Tracking Engine (`app/taint.py`):** Automatically marks the request execution context as `TAINTED` when untrusted external data is ingested, preventing downstream exfiltration sinks (`send_external_webhook`, `delete_user_account`) from executing.
+4. **Deterministic BOLA & RBAC Policy Guard (`app/guard.py`):** Intercepts model-proposed tool calls and validates resource ownership (`target_user_id == session.user_id`) and role permissions against `policies.json`.
+5. **Egress DLP Secret Scrubber & SIEM Telemetry (`app/scrubber.py`, `app/audit.py`, `app/dashboard.py`):** Redacts leaked API keys, JWTs, and credentials on egress while streaming structured OWASP-mapped events to `security_audit.jsonl` and a split-pane SecOps web console (`/dashboard`).
 
 ---
 
@@ -18,14 +19,18 @@ A lightweight, zero-trust FastAPI reverse proxy that protects LLM-powered applic
 ```text
 latch-proxy/
 ├── app/
-│   ├── main.py          # FastAPI server & proxy route (/v1/chat)
-│   ├── context.py       # Immutable session lock (X-User-ID & X-User-Role)
+│   ├── main.py          # FastAPI reverse proxy & routes (/v1/chat, /v1/audit, /dashboard)
+│   ├── context.py       # Immutable session binding & header verification
+│   ├── crypto.py        # Constant-time HMAC-SHA256 signature verification
 │   ├── delimiter.py     # Per-request cryptographic boundary tagging
-│   ├── guard.py         # Deterministic RBAC & BOLA policy engine
-│   └── scrubber.py      # Outbound regex DLP secret scrubber
-├── policies.json        # Declarative tool permissions & BOLA rules
-├── test_attacks.py      # Automated security regression test suite
-├── requirements.txt     # Project dependencies
+│   ├── taint.py         # Dynamic taint-tracking state engine
+│   ├── guard.py         # Deterministic RBAC, BOLA & taint sink enforcement
+│   ├── scrubber.py      # Outbound regex DLP secret scrubber
+│   ├── audit.py         # Structured JSONL SIEM logger with OWASP Top 10 mapping
+│   └── dashboard.py     # Split-pane SecOps packet inspector UI
+├── policies.json        # Declarative tool permissions, BOLA & taint sink rules
+├── test_attacks.py      # 8-stage automated security regression suite
+├── requirements.txt     # Dependencies
 └── README.md
 ```
 
@@ -33,60 +38,35 @@ latch-proxy/
 
 ## Quickstart
 
-### 1. Set Up Environment & Install Dependencies
-
 ```bash
 python -m venv venv
-
-# Windows (PowerShell)
 .\venv\Scripts\Activate.ps1
-
-# Linux / macOS
-source venv/bin/activate
-
 pip install -r requirements.txt
-```
-
-### 2. Start the Proxy Server
-
-```bash
 uvicorn app.main:app --reload
 ```
 
-* **Interactive Swagger UI:** `http://127.0.0.1:8000/docs`
+* **SecOps Packet Inspector Console:** `http://127.0.0.1:8000/dashboard`
+* **Interactive OpenAPI Docs:** `http://127.0.0.1:8000/docs`
 
 ---
 
-## Running the Automated Security Suite
+## Automated Security Regression Suite
 
-With the proxy server running, open a second terminal and run the attack simulation script:
+Run the 8-scenario attack suite against the local proxy:
 
 ```bash
 .\venv\Scripts\python.exe test_attacks.py
 ```
 
-### Expected Output
-
 ```text
-=== Running latch-proxy Security Suite ===
+=== Running latch-proxy Security Suite v2.0 ===
 
 [TEST 1] Authorized Self-Access (user_42 -> user_42): HTTP 200 | Expected: 200
 [TEST 2] BOLA Cross-Tenant Hijack (user_42 -> admin_01): HTTP 403 | Rule: BOLA_CROSS_TENANT_ACCESS | Expected: 403
 [TEST 3] Authorized Admin Override (role=admin):       HTTP 200 | Expected: 200
 [TEST 4] Egress Secret Scrubber:                       HTTP 200 | Redacted: 2 secrets
-         Scrubbed Output: "Here is the summary. Debug info: [REDACTED_OPENAI_OR_OPENROUTER_KEY] and [REDACTED_CREDENTIAL_ASSIGNMENT]"
-```
-
----
-
-## Configuration (Mock vs. Live Mode)
-
-By default, `latch-proxy` runs in **Mock Mode** (`LATCH_MODE=mock`) so you can run all security and BOLA hijack simulations offline without an API key.
-
-To connect a live upstream model via OpenRouter, create a `.env` file in the root directory:
-
-```env
-LATCH_MODE=live
-OPENROUTER_API_KEY=your_api_key_here
-UPSTREAM_MODEL=google/gemini-2.5-flash
+[TEST 5] Tainted Sink Exfiltration (Webhook Blocked):  HTTP 403 | Rule: TAINTED_SINK_EXFILTRATION_BLOCK | Expected: 403
+[TEST 6] Untainted Webhook Call (No external data):    HTTP 200 | Expected: 200
+[TEST 7] Valid HMAC-SHA256 Signed Session:             HTTP 200 | Expected: 200
+[TEST 8] HMAC Role-Spoofing Attack (user -> admin):    HTTP 401 | Expected: 401
 ```
