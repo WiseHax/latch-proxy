@@ -1,12 +1,13 @@
+import hashlib
 import json
 import uuid
-import hashlib
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from collections import deque
 
 AUDIT_FILE = Path(__file__).resolve().parent.parent / "security_audit.jsonl"
-RECENT_EVENTS = deque(maxlen=100)
+RECENT_EVENTS: deque[dict] = deque(maxlen=100)
+_LAST_HASH = "0" * 64
 
 OWASP_MAPPING = {
     "HMAC_SIGNATURE_MISMATCH": "OWASP API2:2023 - Broken Authentication (Header Spoofing)",
@@ -20,11 +21,59 @@ OWASP_MAPPING = {
     "MALICIOUS_TOOL_ARGUMENT_PAYLOAD": "OWASP LLM05:2025 - Improper Output Handling (Argument Injection)",
     "CANARY_SYSTEM_PROMPT_LEAK": "OWASP LLM07:2025 - System Prompt Leakage (Canary Triggered)",
     "PASS": "NONE",
-    "NONE": "NONE"
+    "NONE": "NONE",
 }
 
-# SHA-256 tamper-evident hash chain state
-_LAST_HASH = "0" * 64
+
+def _compute_event_hash(event_without_hash: dict) -> str:
+    canonical = json.dumps(event_without_hash, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _hydrate_chain_from_disk() -> None:
+    """
+    Loads existing hash-chained events from security_audit.jsonl on startup
+    so _LAST_HASH continuity is preserved across server restarts.
+    """
+    global _LAST_HASH
+    if not AUDIT_FILE.exists():
+        return
+
+    try:
+        with open(AUDIT_FILE, "r", encoding="utf-8") as f:
+            lines = [line.strip() for line in f if line.strip()]
+
+        valid_chain_events = []
+        expected_prev = "0" * 64
+
+        for line in lines:
+            record = json.loads(line)
+            if "entry_hash" not in record or "prev_hash" not in record:
+                # Legacy pre-v3.0 log entry without hash fields; reset chain cleanly
+                valid_chain_events.clear()
+                expected_prev = "0" * 64
+                continue
+
+            check_copy = {k: v for k, v in record.items() if k != "entry_hash"}
+            if record["prev_hash"] == expected_prev and _compute_event_hash(check_copy) == record["entry_hash"]:
+                valid_chain_events.append(record)
+                expected_prev = record["entry_hash"]
+            else:
+                valid_chain_events.clear()
+                expected_prev = "0" * 64
+
+        for ev in valid_chain_events[-100:]:
+            RECENT_EVENTS.appendleft(ev)
+
+        if valid_chain_events:
+            _LAST_HASH = valid_chain_events[-1]["entry_hash"]
+    except Exception:
+        _LAST_HASH = "0" * 64
+
+
+# Hydrate chain state when module loads
+_hydrate_chain_from_disk()
+
 
 def log_security_event(
     user_id: str,
@@ -34,11 +83,10 @@ def log_security_event(
     allowed: bool,
     rule_triggered: str,
     secrets_redacted: int,
-    reason: str
+    reason: str,
 ) -> dict:
     """
-    Records a structured SIEM security event with OWASP classification to disk and memory.
-    Each event is chained via SHA-256 for tamper-evident audit integrity.
+    Records a structured SIEM security event with OWASP classification and SHA-256 hash chain.
     """
     global _LAST_HASH
 
@@ -58,13 +106,10 @@ def log_security_event(
         "owasp_category": owasp_tag,
         "secrets_redacted": secrets_redacted,
         "reason": reason,
-        "prev_hash": _LAST_HASH
+        "prev_hash": _LAST_HASH,
     }
 
-    # Compute SHA-256 hash of the event (before entry_hash is added)
-    entry_hash = hashlib.sha256(
-        json.dumps(event, sort_keys=True).encode("utf-8")
-    ).hexdigest()
+    entry_hash = _compute_event_hash(event)
     event["entry_hash"] = entry_hash
     _LAST_HASH = entry_hash
 
@@ -75,33 +120,49 @@ def log_security_event(
 
     return event
 
+
 def verify_audit_chain() -> dict:
     """
-    Verifies the SHA-256 tamper-evident hash chain across all recent events.
-    Iterates in chronological order (oldest first), recomputes each hash,
-    and verifies both prev_hash linkage and entry_hash integrity.
+    Verifies cryptographic linkage (prev_hash -> entry_hash) across in-memory SIEM events.
     """
-    events = list(reversed(list(RECENT_EVENTS)))  # chronological order
-    if not events:
+    chronological = list(reversed(RECENT_EVENTS))
+    if not chronological:
         return {"chain_valid": True, "checked_events": 0, "head_hash": _LAST_HASH}
 
-    for i, event in enumerate(events):
-        # Reconstruct event without entry_hash for verification
-        verify_event = {k: v for k, v in event.items() if k != "entry_hash"}
-        recomputed = hashlib.sha256(
-            json.dumps(verify_event, sort_keys=True).encode("utf-8")
-        ).hexdigest()
+    expected_prev = chronological[0].get("prev_hash", "0" * 64)
 
-        # Verify entry_hash integrity
-        if recomputed != event.get("entry_hash"):
-            return {"chain_valid": False, "checked_events": len(events), "head_hash": _LAST_HASH}
+    for idx, ev in enumerate(chronological):
+        stored_hash = ev.get("entry_hash", "")
+        prev_hash = ev.get("prev_hash", "")
 
-        # Verify prev_hash linkage (first event links to chain start or previous event)
-        if i > 0:
-            if event["prev_hash"] != events[i - 1]["entry_hash"]:
-                return {"chain_valid": False, "checked_events": len(events), "head_hash": _LAST_HASH}
+        if prev_hash != expected_prev:
+            return {
+                "chain_valid": False,
+                "checked_events": idx,
+                "broken_at_event": ev.get("event_id"),
+                "reason": "prev_hash mismatch in ledger chain",
+                "head_hash": _LAST_HASH,
+            }
 
-    return {"chain_valid": True, "checked_events": len(events), "head_hash": _LAST_HASH}
+        check_copy = {k: v for k, v in ev.items() if k != "entry_hash"}
+        recomputed = _compute_event_hash(check_copy)
+        if recomputed != stored_hash:
+            return {
+                "chain_valid": False,
+                "checked_events": idx,
+                "broken_at_event": ev.get("event_id"),
+                "reason": "SHA-256 entry_hash integrity check failed",
+                "head_hash": _LAST_HASH,
+            }
+
+        expected_prev = stored_hash
+
+    return {
+        "chain_valid": True,
+        "checked_events": len(chronological),
+        "head_hash": _LAST_HASH,
+    }
+
 
 def get_audit_summary() -> dict:
     events = list(RECENT_EVENTS)
@@ -115,8 +176,8 @@ def get_audit_summary() -> dict:
             "total_requests": total,
             "blocked_attacks": blocked,
             "tainted_contexts": tainted,
-            "secrets_redacted": redacted
+            "secrets_redacted": redacted,
         },
         "chain_integrity": verify_audit_chain(),
-        "events": events
+        "events": events,
     }
