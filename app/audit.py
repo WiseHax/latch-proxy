@@ -15,6 +15,8 @@ OWASP_MAPPING = {
     "UNREGISTERED_TOOL": "OWASP LLM07:2025 - Excessive Agency",
     "RATE_LIMIT_DOS_BLOCK": "OWASP API4:2023 - Unrestricted Resource Consumption",
     "DENIAL_OF_WALLET_QUOTA_EXCEEDED": "OWASP LLM10:2025 - Unbounded Consumption (Denial of Wallet)",
+    "SSRF_INTERNAL_TARGET_BLOCK": "OWASP API7:2023 - Server Side Request Forgery (SSRF)",
+    "MALICIOUS_TOOL_ARGUMENT_PAYLOAD": "OWASP LLM05:2025 - Improper Output Handling (Argument Injection)",
     "PASS": "NONE",
     "NONE": "NONE"
 }
