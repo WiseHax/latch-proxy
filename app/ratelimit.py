@@ -5,7 +5,7 @@ from collections import defaultdict
 # Sliding-window rate limiter & Denial-of-Wallet quota guard
 # ---------------------------------------------------------------------------
 
-MAX_REQUESTS = 15          # per user per window
+MAX_REQUESTS = 25          # per user per window
 WINDOW_SECONDS = 60        # sliding window size
 MAX_PROMPT_CHARS = 4000    # max combined (prompt + untrusted_context) length
 

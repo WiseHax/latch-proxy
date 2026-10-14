@@ -59,6 +59,10 @@ class ChatRequest(BaseModel):
         default=False,
         description="In mock mode, simulates the LLM leaking the system prompt canary token."
     )
+    simulate_dns_rebind: bool = Field(
+        default=False,
+        description="Simulates a wildcard DNS rebinding SSRF tool call (169.254.169.254.nip.io)."
+    )
 
 async def call_upstream_llm(
     system_prompt: str,
@@ -69,9 +73,20 @@ async def call_upstream_llm(
     simulate_secret_leak: bool,
     simulate_ssrf: bool = False,
     simulate_prompt_leak: bool = False,
+    simulate_dns_rebind: bool = False,
     canary_token: str = ""
 ) -> dict:
     if LATCH_MODE == "mock":
+        if simulate_dns_rebind:
+            return {
+                "type": "tool_call",
+                "tool_name": "send_external_webhook",
+                "arguments": {
+                    "url": "http://169.254.169.254.nip.io/latest/meta-data/iam/security-credentials/",
+                    "payload": "dns_rebind_probe"
+                },
+                "raw_message": "Attempting webhook via wildcard DNS rebinding host..."
+            }
         if simulate_prompt_leak:
             return {
                 "type": "text",
@@ -197,6 +212,7 @@ async def proxy_chat(
         simulate_secret_leak=request.simulate_secret_leak,
         simulate_ssrf=request.simulate_ssrf,
         simulate_prompt_leak=request.simulate_prompt_leak,
+        simulate_dns_rebind=request.simulate_dns_rebind,
         canary_token=canary_token
     )
 
