@@ -1,6 +1,14 @@
 # latch-proxy
 
+![Security CI](https://github.com/WiseHax/latch-proxy/actions/workflows/security-ci.yml/badge.svg)
+
 A zero-trust FastAPI reverse proxy and runtime security gateway that protects LLM-integrated applications from **Indirect Prompt Injection (OWASP LLM01)**, **Broken Object Level Authorization / BOLA (OWASP API1)**, **Header Spoofing (OWASP API2)**, **Data Exfiltration**, and **Sensitive Information Disclosure (OWASP LLM02)**.
+
+---
+
+## Live SecOps Packet Inspector (`/dashboard`)
+
+![latch-proxy SecOps Console](assets/dashboard.png)
 
 ---
 
