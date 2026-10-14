@@ -78,7 +78,7 @@ docker run -p 8000:8000 latch-proxy:v3.0
 
 ---
 
-## 15-Stage Automated Security Regression Suite
+## 16-Stage Automated Security Regression Suite
 
 ```bash
 .\venv\Scripts\python.exe test_attacks.py
@@ -102,4 +102,5 @@ docker run -p 8000:8000 latch-proxy:v3.0
 [TEST 13] Canary Prompt Leak Block (OWASP LLM07):       HTTP 403 | Rule: CANARY_SYSTEM_PROMPT_LEAK | Expected: 403
 [TEST 14] Shannon Entropy DLP Scrubber:                 HTTP 200 | Redacted: True | Expected: 200
 [TEST 15] SHA-256 Audit Chain Verification:             HTTP 200 | Valid: True | Expected: 200
+[TEST 16] Wildcard DNS Rebinding SSRF Block (.nip.io):  HTTP 403 | Rule: SSRF_INTERNAL_TARGET_BLOCK | Expected: 403
 ```
