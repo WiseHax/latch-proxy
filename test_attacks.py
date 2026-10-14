@@ -157,7 +157,23 @@ def run_tests():
         chain_data = r15.json()
         chain_valid = chain_data.get("chain_valid", False)
         checked = chain_data.get("checked_events", 0)
-        print(f"[TEST 15] SHA-256 Audit Hash-Chain Verification:         HTTP {r15.status_code} | Valid: {chain_valid} | Events: {checked} | Expected: 200\n")
+        print(f"[TEST 15] SHA-256 Audit Hash-Chain Verification:         HTTP {r15.status_code} | Valid: {chain_valid} | Events: {checked} | Expected: 200")
+
+        # Test 16: Wildcard DNS Rebinding SSRF Bypass Block (.nip.io)
+        r16 = client.post(
+            BASE_URL,
+            headers={"x-user-id": "user_42", "x-user-role": "user"},
+            json={"prompt": "Webhook health check via nip.io", "simulate_dns_rebind": True}
+        )
+        rule16 = r16.json().get("security_verdict", {}).get("rule_triggered")
+        print(f"[TEST 16] Wildcard DNS Rebinding SSRF Block (.nip.io):  HTTP {r16.status_code} | Rule: {rule16} | Expected: 403\n")
+
+        # Re-verify SHA-256 Audit Hash-Chain after all 16 tests
+        r_final = client.get(AUDIT_VERIFY_URL)
+        chain_final = r_final.json()
+        valid_final = chain_final.get("chain_valid", False)
+        checked_final = chain_final.get("checked_events", 0)
+        print(f"[AUDIT CHAIN RE-VERIFY] Post-Suite SHA-256 Hash-Chain:  HTTP {r_final.status_code} | Valid: {valid_final} | Events: {checked_final} | Expected: 200\n")
 
 if __name__ == "__main__":
     run_tests()
